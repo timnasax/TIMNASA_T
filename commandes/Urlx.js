@@ -1,83 +1,82 @@
-"use strict";
-
 const { zokou } = require("../framework/zokou");
+const { downloadContentFromMessage } = require("@whiskeysockets/baileys");
 const axios = require("axios");
-const fs = require("fs");
 const FormData = require("form-data");
+const fs = require("fs");
+const path = require("path");
 
 zokou({
-    nomCom: "urlx",
-    categorie: "General",
-    reaction: "🔗"
+    nomCom: "url",
+    categorie: "Utility",
+    reaction: "🌐"
 }, async (dest, zk, commandeOptions) => {
-    const { ms, arg, repondre, msgRepondu, msgAudio, prefixe } = commandeOptions;
-    const channelJid = "120363406146813524@newsletter";
+    const { ms, repondre, msgRepondu } = commandeOptions;
+
+    // 1. Check if the user replied to a media message
+    if (!msgRepondu) {
+        return repondre("❌ Please reply to an image, video, audio, or document to convert it into a URL.");
+    }
+
+    // 2. Identify the media type
+    let mediaType = "";
+    let mediaMessage = null;
+
+    if (msgRepondu.imageMessage) { mediaType = "image"; mediaMessage = msgRepondu.imageMessage; }
+    else if (msgRepondu.videoMessage) { mediaType = "video"; mediaMessage = msgRepondu.videoMessage; }
+    else if (msgRepondu.audioMessage) { mediaType = "audio"; mediaMessage = msgRepondu.audioMessage; }
+    else if (msgRepondu.documentMessage) { mediaType = "document"; mediaMessage = msgRepondu.documentMessage; }
+    else {
+        return repondre("❌ Unsupported format. You can only convert Images, Videos, Audios, or Documents.");
+    }
 
     try {
-        /** * OPTION 1: CONVERT AUDIO TO URL (Upload to Catbox.moe)
-         * Usage: Reply to any audio/voice note with .urlx
-         **/
-        if (msgRepondu && msgAudio) {
-            repondre("⌛ *Processing and uploading to Catbox...*");
-            
-            // Download the media from WhatsApp
-            const mediaPath = await zk.downloadAndSaveMediaMessage(msgRepondu);
-            
-            // Prepare form data for Catbox API
-            const bodyForm = new FormData();
-            bodyForm.append("reqtype", "fileupload");
-            bodyForm.append("fileToUpload", fs.createReadStream(mediaPath));
+        await repondre("⏳ *Timnasa Bot is downloading and uploading your file to Catbox... Please wait.*");
 
-            const { data } = await axios.post("https://catbox.moe/user/api.php", bodyForm, {
-                headers: { ...bodyForm.getHeaders() },
-            });
-
-            // Delete temporary file to save space
-            if (fs.existsSync(mediaPath)) fs.unlinkSync(mediaPath);
-
-            return await zk.sendMessage(dest, { 
-                text: `✅ *Audio Uploaded Successfully!*\n\n🔗 *URL:* ${data}\n\n_You can now use this link to play audio anywhere._` 
-            }, { quoted: ms });
+        // 3. Download the media using Baileys stream reader
+        const stream = await downloadContentFromMessage(mediaMessage, mediaType);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) {
+            buffer = Buffer.concat([buffer, chunk]);
         }
 
-        /** * OPTION 2: CONVERT URL TO AUDIO (Play as audio/mpeg)
-         * Usage: .urlx https://files.catbox.moe/example.mp3
-         **/
-        if (arg[0] && arg[0].startsWith("http")) {
-            const audioUrl = arg[0];
-
-            return await zk.sendMessage(dest, {
-                audio: { url: audioUrl },
-                mimetype: 'audio/mpeg',
-                ptt: true, // Forces it to appear as a Voice Note
-                contextInfo: {
-                    forwardingScore: 999,
-                    isForwarded: true,
-                    forwardedNewsletterMessageInfo: {
-                        newsletterJid: channelJid,
-                        newsletterName: "𝚃𝙸𝙼𝙽𝙰𝚂𝙰-𝚃𝙼𝙳 𝚄𝚁𝙻𝚇",
-                        serverMessageId: 1
-                    },
-                    externalAdReply: {
-                        title: "𝚃𝙸𝙼𝙽𝙰𝚂𝙰-𝚃𝙼𝙳 𝚄𝚁𝙻𝚇 𝙿𝙻𝙰𝚈𝙴𝚁",
-                        body: "Streaming high-quality audio",
-                        thumbnailUrl: "https://files.catbox.moe/zm113g.jpg",
-                        sourceUrl: "https://wa.me/255743706043",
-                        mediaType: 1,
-                        renderLargerThumbnail: false
-                    }
-                }
-            }, { quoted: ms });
+        // 4. Determine file extension based on mimeType
+        const mimeType = mediaMessage.mimetype || "";
+        let extension = "bin"; // fallback extension
+        if (mimeType.includes("/")) {
+            extension = mimeType.split("/")[1].split(";")[0]; // extracts 'jpeg', 'mp4', 'mp3', etc.
         }
 
-        // IF NO AUDIO REPLIED AND NO URL PROVIDED
-        repondre(`*『 𝚄𝚁𝙻𝚇 𝚂𝚈𝚂𝚃𝙴𝙼 𝙸𝙽𝚂𝚃𝚁𝚄𝙲𝚃𝙸𝙾𝙽𝚂 』*\n\n` +
-                 `1. *To Create a URL:* Reply to an audio message with *${prefixe}urlx*\n` +
-                 `2. *To Play a URL:* Type *${prefixe}urlx [paste-link-here]*\n\n` +
-                 `_Note: Works with Catbox.moe and all direct audio/mpeg links._`);
+        // Create temporary file path
+        const tempFilePath = path.join(__dirname, `temp_${Date.now()}.${extension}`);
+        fs.writeFileSync(tempFilePath, buffer);
+
+        // 5. Prepare data and upload to Catbox API
+        const form = new FormData();
+        form.append("reqtype", "fileupload");
+        form.append("fileToUpload", fs.createReadStream(tempFilePath));
+
+        const response = await axios.post("https://catbox.moe/user/api.php", form, {
+            headers: {
+                ...form.getHeaders()
+            }
+        });
+
+        // 6. Delete the temporary local file to save storage space
+        fs.unlinkSync(tempFilePath);
+
+        // 7. Process the response and deliver the link
+        if (response.data && response.data.startsWith("http")) {
+            let successMsg = `*✨ TIMNASA URL CONVERTER ✨*\n\n`;
+            successMsg += `*🔗 File URL:* ${response.data.trim()}\n\n`;
+            successMsg += `*⚡ Powered by Catbox.moe*`;
+            
+            await zk.sendMessage(dest, { text: successMsg }, { quoted: ms });
+        } else {
+            repondre("❌ Catbox API rejected the file upload.");
+        }
 
     } catch (error) {
-        console.error("URLX System Error:", error);
-        repondre("❌ *Error:* Failed to process the request. Ensure the file/link is valid.");
+        console.error("Error converting media to URL: ", error);
+        repondre("⚠️ An error occurred while processing and uploading your media.");
     }
 });
